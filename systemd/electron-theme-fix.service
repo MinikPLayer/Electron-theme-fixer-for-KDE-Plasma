@@ -1,0 +1,13 @@
+[Unit]
+Description=Fix Electron apps lagging one theme change behind Plasma
+After=plasma-plasmashell.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/share/electron-theme-fix/fixer.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
