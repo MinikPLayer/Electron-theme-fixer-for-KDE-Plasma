@@ -10,23 +10,32 @@ How it works
 Plasma broadcasts theme changes over D-Bus via the xdg-desktop-portal
 "Settings" interface (the same interface Electron/Chromium use internally to
 learn about the system color scheme). We listen for that broadcast, wait a
-short moment for Plasma to finish applying the new scheme, and then
-re-apply the *currently active* accent color with ``plasma-apply-colorscheme
--a``. Re-issuing the "same" color scheme by name is rejected by
-plasma-apply-colorscheme (it refuses to set a scheme that's already active),
-but re-issuing the current accent color is not - and doing so forces the same
-fresh theme-changed notification that nudges Electron apps into repainting
-with the correct theme.
+short moment, then nudge Electron apps into re-checking the theme using one
+of two interchangeable strategies (see ThemeFixStrategy):
+
+- DBusDirectSignalFixer (default) - emits a synthetic
+  ca.desrt.dconf.Writer.Notify signal for an empty GNOME interface-theme
+  key. Nothing about the real theme is ever read or written; the mere
+  change *notification* is enough to make Electron/GTK apps re-check the
+  system theme.
+- PlasmaColorSchemeFixer (--plasma-fixer/-pf) - re-applies the *currently
+  active* accent color with ``plasma-apply-colorscheme -a``. Re-issuing the
+  color scheme by *name* doesn't work - plasma-apply-colorscheme refuses to
+  set a scheme that's already active - but re-issuing the current accent
+  color is accepted, and makes Plasma re-broadcast the color-scheme portal
+  setting as a side effect, which is what actually does the nudging.
 
 Requirements
 ------------
 - python-dbus and python-gobject (GLib main loop)
-- plasma-apply-colorscheme (part of plasma-workspace)
-- kreadconfig6 or kreadconfig5 (part of kconfig / plasma-workspace)
+- gdbus (part of glib2) for the default DBusDirectSignalFixer
+- plasma-apply-colorscheme and kreadconfig6/kreadconfig5 (part of
+  plasma-workspace / kconfig) only if using --plasma-fixer
 
 Usage
 -----
-    ./fixer.py
+    ./fixer.py                 # default: dconf change-notification method
+    ./fixer.py --plasma-fixer  # KDE-Plasma-specific accent-color method
 
 Run it in the background, e.g. as a systemd --user service - see
 systemd/electron-theme-fix.service (or just run install.py).
@@ -40,6 +49,7 @@ import shutil
 import subprocess
 import sys
 import time
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
 
@@ -60,16 +70,13 @@ log = logging.getLogger("electron-theme-fix")
 
 
 class Consts:
-    """Static configuration - D-Bus addresses and timings."""
+    """Static configuration - what to watch, and how long to remember it."""
 
-    # This should not be hard coded, but there's no D-Bus API to query it, sorry!
-    APPLY_DELAY_SECONDS = 1.0
-
-    # plasma-apply-colorscheme re-broadcasts org.freedesktop.appearance/color-scheme
-    # as a side effect of re-applying the accent color, even though the value
-    # didn't actually change. Without suppressing that echo we'd re-trigger
-    # ourselves and loop forever. Ignore SettingChanged signals for this long
-    # after each fix we apply.
+    # How long a fired fix's fingerprint is remembered for, to tell an echo
+    # of our own fix apart from a genuinely new theme switch arriving in the
+    # same window. Shared across fix strategies - it's a harmless no-op for
+    # one whose action doesn't cause an echo on the watched signal in the
+    # first place (DBusDirectSignalFixer; see ThemeChangeFixer).
     SUPPRESS_WINDOW_SECONDS = 2.0
 
     PORTAL_BUS_NAME = "org.freedesktop.portal.Desktop"
@@ -92,21 +99,6 @@ def find_executable(*candidates: str) -> str:
     sys.exit(1)
 
 
-class Executables:
-    """Resolved paths to the external tools this script shells out to.
-
-    Populated once via resolve(), called at startup from main().
-    """
-
-    KREADCONFIG: str = ""
-    PLASMA_APPLY_COLORSCHEME: str = ""
-
-    @classmethod
-    def resolve(cls) -> None:
-        cls.KREADCONFIG = find_executable("kreadconfig6", "kreadconfig5")
-        cls.PLASMA_APPLY_COLORSCHEME = find_executable("plasma-apply-colorscheme")
-
-
 @dataclass
 class SeenChange:
     """A recent color-scheme change we've already scheduled a fix for.
@@ -125,25 +117,45 @@ class SeenChange:
     color_scheme: object
 
 
-class ThemeChangeFixer:
-    """Watches for Plasma theme changes and re-applies the accent color to
-    nudge Electron apps into refreshing.
+class ThemeFixStrategy(ABC):
+    """Common interface for a "nudge Electron apps into refreshing" method.
+    Exactly one strategy is active per run, chosen in main() via
+    --plasma-fixer.
     """
 
-    def __init__(self) -> None:
-        # Recent color-scheme values we've already scheduled a fix for, so a
-        # repeat of the *same* value shortly afterwards - most commonly the
-        # echo plasma-apply-colorscheme's own re-apply causes, but possibly
-        # just Plasma firing the signal twice for one real change - can be
-        # told apart from a genuinely new switch (e.g. back to the previous
-        # scheme) arriving in the same window, which must still go through.
-        self._recent_changes: list[SeenChange] = []
+    @property
+    @abstractmethod
+    def apply_delay_seconds(self) -> float:
+        """Seconds to wait after detecting a theme change before firing.
+        Tuned per strategy by hand - there's no D-Bus API to query the
+        "right" value, sorry."""
 
-    def _find_recent_change(self, color_scheme: object) -> SeenChange | None:
-        for entry in self._recent_changes:
-            if entry.color_scheme == color_scheme:
-                return entry
-        return None
+    @abstractmethod
+    def resolve_executables(self) -> None:
+        """Locate/validate any external tools this strategy needs. Called
+        once at startup, only for whichever strategy was actually selected."""
+
+    @abstractmethod
+    def apply_fix(self) -> None:
+        """Perform the actual nudge that gets Electron apps to refresh."""
+
+
+class PlasmaColorSchemeFixer(ThemeFixStrategy):
+    """Re-applies the current accent color via ``plasma-apply-colorscheme
+    -a`` (see the module docstring for why that's what actually nudges
+    Electron apps). KDE-Plasma-specific: needs kreadconfig and
+    plasma-apply-colorscheme.
+    """
+
+    apply_delay_seconds = 1.0
+
+    def __init__(self) -> None:
+        self.kreadconfig = ""
+        self.plasma_apply_colorscheme = ""
+
+    def resolve_executables(self) -> None:
+        self.kreadconfig = find_executable("kreadconfig6", "kreadconfig5")
+        self.plasma_apply_colorscheme = find_executable("plasma-apply-colorscheme")
 
     def current_accent_color(self) -> Optional[str]:
         """Return the active accent color from kdeglobals as a "#rrggbb" hex string.
@@ -155,7 +167,7 @@ class ThemeChangeFixer:
         try:
             result = subprocess.run(
                 [
-                    Executables.KREADCONFIG,
+                    self.kreadconfig,
                     "--file", "kdeglobals",
                     "--group", "General",
                     "--key", "AccentColor",
@@ -185,7 +197,7 @@ class ThemeChangeFixer:
 
         return f"#{r:02x}{g:02x}{b:02x}"
 
-    def reapply_accent_color(self) -> None:
+    def apply_fix(self) -> None:
         color = self.current_accent_color()
         if not color:
             log.warning(
@@ -196,7 +208,7 @@ class ThemeChangeFixer:
         log.info("Re-applying accent color %s to nudge Electron apps into refreshing", color)
         try:
             subprocess.run(
-                [Executables.PLASMA_APPLY_COLORSCHEME, "-a", color],
+                [self.plasma_apply_colorscheme, "-a", color],
                 capture_output=True,
                 text=True,
                 check=True,
@@ -204,17 +216,80 @@ class ThemeChangeFixer:
         except subprocess.CalledProcessError as exc:
             log.error("plasma-apply-colorscheme failed: %s", exc.stderr.strip())
 
+
+class DBusDirectSignalFixer(ThemeFixStrategy):
+    """Emits a synthetic ca.desrt.dconf.Writer.Notify signal for an empty
+    GNOME interface-theme key. Electron/GTK apps that watch dconf for theme
+    changes re-check the system theme whenever they see *any* change notice
+    on that key, regardless of its value - so an empty, meaningless value
+    works just as well as a real one, and we never have to read or write
+    anything real: only a change notification goes out, not an actual
+    setting. Default strategy; needs gdbus (part of glib2).
+    """
+
+    apply_delay_seconds = 0.2
+
+    NOTIFY_OBJECT_PATH = "/ca/desrt/dconf/Writer/user"
+    NOTIFY_SIGNAL = "ca.desrt.dconf.Writer.Notify"
+    NOTIFY_KEY_PATH = "/org/gnome/desktop/interface/"
+
+    def __init__(self) -> None:
+        self.gdbus = ""
+
+    def resolve_executables(self) -> None:
+        self.gdbus = find_executable("gdbus")
+
+    def apply_fix(self) -> None:
+        log.info("Emitting a synthetic theme-change notification to nudge Electron apps into refreshing")
+        try:
+            subprocess.run(
+                [
+                    self.gdbus, "emit", "--session",
+                    "--object-path", self.NOTIFY_OBJECT_PATH,
+                    "--signal", self.NOTIFY_SIGNAL,
+                    self.NOTIFY_KEY_PATH, "['color-scheme']", "prefer-dark",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            log.error("gdbus emit failed: %s", exc.stderr.strip())
+
+
+class ThemeChangeFixer:
+    """Watches for Plasma theme changes and, after a short delay, asks a
+    ThemeFixStrategy to nudge Electron apps into refreshing.
+    """
+
+    def __init__(self, strategy: ThemeFixStrategy) -> None:
+        self._strategy = strategy
+        # Recent color-scheme values we've already scheduled a fix for, so a
+        # repeat of the *same* value shortly afterwards - most commonly an
+        # echo the active strategy's own fix causes, but possibly just
+        # Plasma firing the signal twice for one real change - can be told
+        # apart from a genuinely new switch (e.g. back to the previous
+        # scheme) arriving in the same window, which must still go through.
+        self._recent_changes: list[SeenChange] = []
+
+    def _find_recent_change(self, color_scheme: object) -> SeenChange | None:
+        for entry in self._recent_changes:
+            if entry.color_scheme == color_scheme:
+                return entry
+        return None
+
     def _fire_once(self, color_scheme: object) -> bool:
-        self.reapply_accent_color()
-        # The echo this causes won't reach on_setting_changed() until roughly
-        # now + (D-Bus/process overhead), not until APPLY_DELAY_SECONDS from
+        self._strategy.apply_fix()
+        # If (and only if) this strategy's fix causes an echo of the watched
+        # signal, that echo won't reach on_setting_changed() until roughly
+        # now + (D-Bus/process overhead), not until apply_delay_seconds from
         # when we first *detected* the change - so the window has to count
         # down from here (fire time), not from detection time, or it can
         # elapse before the echo we're trying to catch even arrives (e.g.
-        # whenever APPLY_DELAY_SECONDS is a sizeable fraction of
-        # SUPPRESS_WINDOW_SECONDS - as they briefly, exactly were - the
-        # window would expire right as the echo was still in flight, so every
-        # echo looked "new" and re-fired forever).
+        # whenever apply_delay_seconds is a sizeable fraction of
+        # SUPPRESS_WINDOW_SECONDS, the window could expire right as the echo
+        # was still in flight, making every echo look "new" and re-fire
+        # forever).
         entry = self._find_recent_change(color_scheme)
         if entry is not None:
             entry.timestamp = time.monotonic()
@@ -231,7 +306,7 @@ class ThemeChangeFixer:
             if age < Consts.SUPPRESS_WINDOW_SECONDS:
                 log.debug(
                     "Ignoring color-scheme change (value=%r) - seen %.2fs ago, within the "
-                    "%.1fs window; likely an echo of our own accent-color re-apply",
+                    "%.1fs window; likely an echo of our own fix",
                     value, age, Consts.SUPPRESS_WINDOW_SECONDS,
                 )
                 return
@@ -243,9 +318,9 @@ class ThemeChangeFixer:
 
         log.info(
             "Detected system theme change (%s/%s=%r); scheduling fix in %.1fs",
-            namespace, key, value, Consts.APPLY_DELAY_SECONDS,
+            namespace, key, value, self._strategy.apply_delay_seconds,
         )
-        GLib.timeout_add(int(Consts.APPLY_DELAY_SECONDS * 1000), self._fire_once, value)
+        GLib.timeout_add(int(self._strategy.apply_delay_seconds * 1000), self._fire_once, value)
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -254,6 +329,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         "theme changes and nudges Electron apps into picking them up.",
     )
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {VERSION}")
+    parser.add_argument(
+        "-pf", "--plasma-fixer", action="store_true",
+        help="Use the KDE-Plasma-specific accent-color re-apply method "
+        "(plasma-apply-colorscheme) instead of the default dconf "
+        "change-notification method.",
+    )
     return parser.parse_args(argv)
 
 
@@ -268,15 +349,16 @@ def _import_dbus_deps() -> None:
 
 
 def main() -> int:
-    parse_args()  # handles --version/-h by printing and exiting; nothing to do otherwise
+    args = parse_args()  # also handles --version/-h by printing and exiting
 
-    Executables.resolve()
+    strategy: ThemeFixStrategy = PlasmaColorSchemeFixer() if args.plasma_fixer else DBusDirectSignalFixer()
+    strategy.resolve_executables()
     _import_dbus_deps()
 
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SessionBus()
 
-    fixer = ThemeChangeFixer()
+    fixer = ThemeChangeFixer(strategy)
     bus.add_signal_receiver(
         fixer.on_setting_changed,
         signal_name="SettingChanged",
@@ -285,7 +367,10 @@ def main() -> int:
         path=Consts.PORTAL_OBJECT_PATH,
     )
 
-    log.info("Watching for Plasma theme changes via %s...", Consts.PORTAL_SETTINGS_IFACE)
+    log.info(
+        "Watching for Plasma theme changes via %s (fix method: %s)...",
+        Consts.PORTAL_SETTINGS_IFACE, type(strategy).__name__,
+    )
     loop = GLib.MainLoop()
     try:
         loop.run()
