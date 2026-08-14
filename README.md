@@ -25,7 +25,7 @@ That being said, for best results you should:
 - Have an SSD, especially for the gtk-watcher detection strategy.
 - Wait at least a few seconds between changing themes.
 - Touch grass
-- Don't use GTK4 apps with the Breeze theme (I'm not sure why, but GTK4 apps not using libadwaita don't respond at all to these methods, while libadwaita forgot about theming)
+- Don't use GTK4 apps with the Breeze theme (I'm not sure why, but GTK4 apps not using libadwaita don't respond at all to these methods, while libadwaita skips theming altogether)
 
 ## Potential improvement directions
 - GTK4 app support (gtk4-demo as an example)
