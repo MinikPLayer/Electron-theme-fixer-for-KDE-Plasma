@@ -41,6 +41,19 @@ class ThemeEventDetectionStrategy(ABC):
     that mechanism actually blocks.
     """
 
+    # Whether ThemeChangeFixer should dedupe a repeat on_theme_changed() call
+    # within Consts.SUPPRESS_WINDOW_SECONDS as a likely echo of our own fix,
+    # rather than a genuinely new change. True is right whenever the "value"
+    # token passed to on_theme_changed() is authoritative - i.e. it comes
+    # straight from the change notification's own payload (the D-Bus/
+    # GSettings color-scheme value), so a repeat of the *same* value really
+    # does look like an echo. Override to False when a strategy has no such
+    # token and passes a constant instead (see GtkFileWatcherDetectionStrategy)
+    # - there, every genuinely new change is indistinguishable from an echo
+    # by value alone, so suppressing by value would wrongly swallow real
+    # changes instead of just echoes.
+    suppress_echo_window: bool = True
+
     @abstractmethod
     def resolve_dependencies(self) -> None:
         """Locate/validate any external tools or connections this strategy

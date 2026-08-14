@@ -152,7 +152,7 @@ class GtkFileWatcherDetectionStrategy(ThemeEventDetectionStrategy):
     # arrives for some reason. Reset on every new event. Only actually
     # elapses if nothing conclusively signals "done" first - see
     # DebouncedHandler.on_any_event.
-    DEBOUNCE_SECONDS = 0.1
+    DEBOUNCE_SECONDS = 0.5
 
     WATCHED_DIRS = [
         Path("~/.config/gtk-3.0").expanduser(),
@@ -163,6 +163,12 @@ class GtkFileWatcherDetectionStrategy(ThemeEventDetectionStrategy):
     # write-close (IN_CLOSE_WRITE) or an atomic rename landing on them -
     # rather than just guessing based on a quiet period. See DebouncedHandler.
     EXPECTED_SETTINGS_FILES = {directory / "settings.ini" for directory in WATCHED_DIRS}
+
+    # This strategy has no natural per-change value to give on_theme_changed()
+    # (see _on_settled below), so it passes a constant instead - which means
+    # ThemeChangeFixer's by-value dedup can't tell a genuinely new change
+    # apart from an echo of our own fix; see ThemeEventDetectionStrategy.
+    suppress_echo_window = False
 
     def __init__(self) -> None:
         self._observer = Observer()
@@ -177,10 +183,11 @@ class GtkFileWatcherDetectionStrategy(ThemeEventDetectionStrategy):
                 # No natural "what changed to" value exists for this
                 # detection mechanism (unlike the D-Bus/GSettings
                 # strategies, which get one from the change notification's
-                # own payload) - a constant token is enough for
-                # ThemeChangeFixer's dedup, since consecutive genuine
-                # settings.ini rewrites within the suppress window are rare
-                # and harmless to collapse together.
+                # own payload) - a constant token is passed instead.
+                # suppress_echo_window = False above stops ThemeChangeFixer
+                # from deduping by this (meaningless, always-equal) value,
+                # which would otherwise wrongly collapse genuinely new
+                # changes together, not just echoes.
                 on_theme_changed(True)
 
         self._handler = DebouncedHandler(_on_settled, self.EXPECTED_SETTINGS_FILES, self.DEBOUNCE_SECONDS)
