@@ -151,7 +151,7 @@ def main() -> int:
     detection_strategy = _load_detection_strategy(args.detection_strategy)
     detection_strategy.resolve_dependencies()
 
-    fixer = ThemeChangeFixer(fix_strategy)
+    fixer = ThemeChangeFixer(fix_strategy, suppress_echo_window=detection_strategy.suppress_echo_window)
     detection_strategy.start(fixer.on_theme_changed)
 
     log.info(

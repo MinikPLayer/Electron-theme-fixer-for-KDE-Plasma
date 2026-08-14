@@ -30,8 +30,10 @@ class Consts:
     # same window. Shared across fix strategies - it's a harmless no-op for
     # one whose action doesn't cause an echo on the watched signal in the
     # first place (e.g. DBusDirectSignalFixer under GtkFileWatcherDetectionStrategy,
-    # which never touches gtk-3.0/gtk-4.0 settings.ini).
-    SUPPRESS_WINDOW_SECONDS = 2.0
+    # which never touches gtk-3.0/gtk-4.0 settings.ini). Only applies to
+    # detection strategies that opt in via
+    # ThemeEventDetectionStrategy.suppress_echo_window - see there.
+    SUPPRESS_WINDOW_SECONDS = 0.5
 
 
 @dataclass
@@ -59,8 +61,15 @@ class ThemeChangeFixer:
     start().
     """
 
-    def __init__(self, strategy: ThemeFixStrategy) -> None:
+    def __init__(self, strategy: ThemeFixStrategy, suppress_echo_window: bool = True) -> None:
         self._strategy = strategy
+        # Whether to dedupe repeat on_theme_changed() values within
+        # Consts.SUPPRESS_WINDOW_SECONDS at all - False for a detection
+        # strategy whose "value" token can't tell a genuinely new change
+        # apart from an echo in the first place (see
+        # ThemeEventDetectionStrategy.suppress_echo_window), in which case
+        # every detected change is just fired, unconditionally.
+        self._suppress_echo_window = suppress_echo_window
         # Recent values we've already scheduled a fix for, so a repeat of
         # the *same* value shortly afterwards - most commonly an echo the
         # active fix strategy's own action causes, but possibly just the
@@ -82,6 +91,8 @@ class ThemeChangeFixer:
 
     def _fire_once(self, value: object) -> None:
         self._strategy.apply_fix()
+        if not self._suppress_echo_window:
+            return
         # If (and only if) this strategy's fix causes an echo of the watched
         # change, that echo won't reach on_theme_changed() until roughly now
         # + (D-Bus/process overhead), not until apply_delay_seconds from when
@@ -97,6 +108,14 @@ class ThemeChangeFixer:
         """Callback to hand a ThemeEventDetectionStrategy's start(). Call
         once per detected change, with an equality-comparable token
         describing the new state."""
+        if not self._suppress_echo_window:
+            # The active detection strategy opted out (its value token can't
+            # tell a genuinely new change apart from an echo - see
+            # ThemeEventDetectionStrategy.suppress_echo_window), so skip the
+            # dedup bookkeeping entirely and just fire on every change.
+            self._schedule_fix(value)
+            return
+
         with self._lock:
             now = time.monotonic()
             existing = self._find_recent_change_locked(value)
@@ -115,6 +134,9 @@ class ThemeChangeFixer:
 
             self._recent_changes.append(SeenChange(timestamp=now, value=value))
 
+        self._schedule_fix(value)
+
+    def _schedule_fix(self, value: object) -> None:
         log.info(
             "Detected system theme change (value=%r); scheduling fix in %.1fs",
             value, self._strategy.apply_delay_seconds,

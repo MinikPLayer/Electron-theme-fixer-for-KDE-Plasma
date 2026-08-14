@@ -1,17 +1,40 @@
-# Electron Theme Fixer for KDE Plasma
+# Electron Theme Fixer for KDE Plasma 
 
 This is a workaround for [electron/electron#48736](https://github.com/electron/electron/issues/48736)
 ("Regression: v39 incorrectly resolves the system theme (light/dark) at
 runtime and also calculates `nativeTheme.shouldUseDarkColors` incorrectly at
 runtime") — Electron picks up the *previous* system theme instead of the
-current one after a runtime light/dark switch on KDE Plasma/Wayland.
+current one after a light/dark theme switch on KDE Plasma/Wayland.
 
 ## AI Warning
 
 This repo contains code that is partially AI generated with heavy human guidance.
-Implemented solutions were my ideas, but the final code was developed with heavy AI usage - even if AI was only used as a tool to implement a previously defined algorithm (instead of letting it generate the architecture freely).
+Implemented solutions were my ideas, but the final code was developed with heavy AI usage, which was used as a tool to implement a previously defined algorithm (instead of letting it generate the architecture freely).
 This was by design, as this project was meant to be a training exercise for me on how to use AI effectively.
 If this bothers You - skip this repo and I totally understand not everyone is okay with that.
+
+## Traditional Warning
+
+This solution is tested on one configuration, by one person and is a quick bodge for a difficult to solve problem.
+There is absolutely no way it's even close to being good, let alone perfect.
+I'd be very grateful for any testing, suggestions or pull requests!
+
+A proper fix would probably be in the plasmashell itself, where it would be possible to integrate these "double event" strategies, without bodging event detection.
+
+That being said, for best results you should:
+- Have an SSD, especially for the gtk-watcher detection strategy.
+- Wait at least a few seconds between changing themes.
+- Touch grass
+- Don't use GTK4 apps with the Breeze theme (I'm not sure why, but GTK4 apps not using libadwaita don't respond at all to these methods, while libadwaita forgot about theming)
+
+## Potential improvement directions
+- GTK4 app support (gtk4-demo as an example)
+- More / better testing, especially on weaker hardware / slower storage
+- Find a GF
+- Sleep more
+- GNOME support
+
+# Project details (thanks Claude!)
 
 ## How it works
 
