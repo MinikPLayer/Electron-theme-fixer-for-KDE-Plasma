@@ -8,6 +8,11 @@ Usage:
     ./install.py --uninstall [--system | --user] [--install-dir DIR]
     ./install.py --version
 
+Installs the whole src/ directory (electron-theme-fixer.py and the strategy
+modules it imports) as-is - it's the strategy modules' own lazy imports (see
+src/theme_event_detection_strategy.py) that keep an install usable without
+every optional dependency present, not anything this installer filters out.
+
 Uninstalling later doesn't require this file: a self-uninstalling copy is
 dropped into the install directory as uninstall.sh at install time.
 """
@@ -36,8 +41,9 @@ _BAKED_INSTALL_DIR = ""  # absolute path, filled in on the generated copy
 
 APP_NAME = "electron-theme-fix"
 SERVICE_NAME = f"{APP_NAME}.service"
-SCRIPT_FILENAME = "fixer.py"
-SOURCE_SCRIPT = Path(__file__).resolve().parent / SCRIPT_FILENAME
+ENTRY_FILENAME = "electron-theme-fixer.py"
+SOURCE_DIR = Path(__file__).resolve().parent / "src"
+SOURCE_ENTRY_SCRIPT = SOURCE_DIR / ENTRY_FILENAME
 
 SYSTEM_DEFAULT_INSTALL_DIR = Path("/usr/share") / APP_NAME
 USER_DEFAULT_INSTALL_DIR = Path.home() / ".local" / "share" / APP_NAME
@@ -102,11 +108,12 @@ def ask_choice(prompt: str, choices: dict) -> str:
 
 
 # --- Version handling --------------------------------------------------------
-# Versions are read by regexing the *source text* of a fixer.py, never by
-# executing/importing it. That means version checks work even against a
-# fixer.py whose dependencies (python-dbus/python-gobject) aren't installed,
-# and never risk running someone else's arbitrary code just to ask "what
-# version are you".
+# Versions are read by regexing the *source text* of an electron-theme-fixer.py,
+# never by executing/importing it. That means version checks work even
+# against an install whose optional dependencies (python-dbus/python-gobject/
+# watchdog - see src/theme_event_detection_strategy.py) aren't installed, and
+# never risk running someone else's arbitrary code just to ask "what version
+# are you".
 
 _VERSION_RE = re.compile(r'^VERSION\s*=\s*[\'"]([^\'"]+)[\'"]', re.MULTILINE)
 _EXEC_START_RE = re.compile(r'^ExecStart=(.+)$', re.MULTILINE)
@@ -146,7 +153,7 @@ def compare_versions(a: str, b: str) -> int | None:
     return (ta > tb) - (ta < tb)
 
 
-CURRENT_VERSION = read_version_from_script(SOURCE_SCRIPT)
+CURRENT_VERSION = read_version_from_script(SOURCE_ENTRY_SCRIPT)
 
 
 @dataclass
@@ -163,7 +170,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "-v", "--version", action="version",
-        version=f"%(prog)s (bundles {SCRIPT_FILENAME} {CURRENT_VERSION or 'unknown'})",
+        version=f"%(prog)s (bundles {ENTRY_FILENAME} {CURRENT_VERSION or 'unknown'})",
     )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
@@ -188,8 +195,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         "running its uninstall.sh first. Faster, but can leave stale files behind or hit a "
         "running service mid-swap; daemon-reload + restart run afterward to compensate.",
     )
-    # NOTE: -u is already taken by --user (see INSTALLER_INSTRUCTIONS.md,
-    # "Deviations from the literal spec"), so --uninstall uses -U instead.
+    # NOTE: -u is taken by --user (see AI_DOCS/INSTALLER_INSTRUCTIONS.md), so
+    # --uninstall uses -U instead.
     parser.add_argument(
         "-U", "--uninstall", action="store_true",
         help="Uninstall instead of installing.",
@@ -236,7 +243,7 @@ def detect_existing_install(mode: str, target_dir: Path) -> ExistingInstall | No
     filesystem check against the target directory itself, then (if that
     turns up nothing) the systemd unit for this mode's scope, whose
     ExecStart may point somewhere else entirely."""
-    target_script = target_dir / SCRIPT_FILENAME
+    target_script = target_dir / ENTRY_FILENAME
     if target_dir.exists() and target_script.exists():
         return ExistingInstall(
             directory=target_dir,
@@ -265,7 +272,14 @@ def detect_existing_install(mode: str, target_dir: Path) -> ExistingInstall | No
 
 
 def check_environment_or_prompt() -> None:
+    # Hard problems: things needed by the *default* strategy pair the
+    # installed script runs with out of the box - gtk-watcher detection
+    # (GtkFileWatcherDetectionStrategy) + dconf fix (DBusDirectSignalFixer).
     problems = []
+    # Soft notices: only needed for a --detection-strategy/--fix-strategy the
+    # installed script *can* be run with later even though it isn't the
+    # default - worth mentioning, but not worth gating the install on.
+    notices = []
 
     current_desktop = os.environ.get("XDG_CURRENT_DESKTOP", "")
     session_desktop = os.environ.get("XDG_SESSION_DESKTOP", "")
@@ -276,23 +290,49 @@ def check_environment_or_prompt() -> None:
             "This tool only works on KDE Plasma."
         )
 
-    if not shutil.which("plasma-apply-colorscheme"):
+    if not shutil.which("gdbus"):
         problems.append(
-            "plasma-apply-colorscheme was not found in PATH "
-            "(usually part of the 'plasma-workspace' package)."
+            "gdbus was not found in PATH (usually part of the 'glib2' package) - "
+            "needed by the default fix strategy (dconf/DBusDirectSignalFixer)."
+        )
+
+    try:
+        __import__("watchdog")
+    except ImportError:
+        problems.append(
+            "Python module 'watchdog' is not importable (install the 'watchdog' "
+            "package) - needed by the default detection strategy "
+            "(gtk-watcher/GtkFileWatcherDetectionStrategy)."
+        )
+
+    if not shutil.which("plasma-apply-colorscheme"):
+        notices.append(
+            "plasma-apply-colorscheme was not found in PATH (usually part of the "
+            "'plasma-workspace' package) - only needed with --fix-strategy plasma."
         )
 
     if not any(shutil.which(c) for c in KREADCONFIG_CANDIDATES):
-        problems.append(
-            "Neither kreadconfig6 nor kreadconfig5 was found in PATH "
-            "(usually part of 'kconfig' / 'plasma-workspace')."
+        notices.append(
+            "Neither kreadconfig6 nor kreadconfig5 was found in PATH (usually part of "
+            "'kconfig' / 'plasma-workspace') - only needed with --fix-strategy plasma."
         )
 
-    for module, package in (("dbus", "python-dbus"), ("gi", "python-gobject")):
+    for module, package, needed_for in (
+        ("dbus", "python-dbus", "--detection-strategy dbus"),
+        ("gi", "python-gobject", "--detection-strategy dbus or gsettings"),
+    ):
         try:
             __import__(module)
         except ImportError:
-            problems.append(f"Python module '{module}' is not importable (install '{package}').")
+            notices.append(
+                f"Python module '{module}' is not importable (install '{package}') - "
+                f"only needed with {needed_for}."
+            )
+
+    if notices:
+        print("Note:")
+        for notice in notices:
+            print(f"  - {notice}")
 
     if not problems:
         return
@@ -475,12 +515,28 @@ def write_uninstaller(install_dir: Path, mode: str) -> Path:
 
 def install_systemd_unit(mode: str, install_dir: Path, service_name: str) -> None:
     unit_path = unit_path_for(mode, service_name)
-    exec_start = str(install_dir / SCRIPT_FILENAME)
+    exec_start = str(install_dir / ENTRY_FILENAME)
 
     unit_path.parent.mkdir(parents=True, exist_ok=True)
     unit_path.write_text(UNIT_TEMPLATE.format(exec_start=exec_start))
     print(f"  Systemd unit: {unit_path}")
     daemon_reload(mode)
+
+
+def copy_source_tree(install_dir: Path) -> list[Path]:
+    """Copy every file under SOURCE_DIR (src/ - electron-theme-fixer.py plus
+    the strategy modules it lazily imports) into install_dir, skipping
+    bytecode caches. Returns the copied files' paths relative to install_dir,
+    sorted, for the installer's own printed summary."""
+    if not SOURCE_DIR.is_dir():
+        eprint(f"ERROR: source directory {SOURCE_DIR} does not exist - is this a full checkout?")
+        sys.exit(1)
+
+    shutil.copytree(
+        SOURCE_DIR, install_dir, dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    return sorted(path.relative_to(install_dir) for path in install_dir.rglob("*") if path.is_file())
 
 
 def perform_install(mode: str, install_dir: Path, install_systemd: bool, service_name: str = SERVICE_NAME) -> Path:
@@ -490,10 +546,11 @@ def perform_install(mode: str, install_dir: Path, install_systemd: bool, service
         shutil.rmtree(install_dir)
     install_dir.mkdir(parents=True, exist_ok=True)
 
-    dest_script = install_dir / SCRIPT_FILENAME
-    shutil.copy2(SOURCE_SCRIPT, dest_script)
-    dest_script.chmod(0o755)
-    print(f"  Script: {dest_script}")
+    for relative_path in copy_source_tree(install_dir):
+        print(f"  {relative_path}")
+
+    dest_entry = install_dir / ENTRY_FILENAME
+    dest_entry.chmod(0o755)  # belt-and-braces - it's already +x in the repo, but don't rely on that surviving the copy
 
     uninstaller = write_uninstaller(install_dir, mode)
     print(f"  Uninstaller: {uninstaller}")
