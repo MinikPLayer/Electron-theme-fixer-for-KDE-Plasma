@@ -175,7 +175,7 @@ To uninstall:
 ```
 
 Full installer behavior (modes, conflict handling, flags) is documented in
-[INSTALLER_INSTRUCTIONS.md](INSTALLER_INSTRUCTIONS.md).
+[AI_DOCS/INSTALLER_INSTRUCTIONS.md](AI_DOCS/INSTALLER_INSTRUCTIONS.md).
 
 Prefer to skip the installer entirely? Add `electron-theme-fixer.py` to
 Plasma's autostart instead (System Settings → Autostart → Add Script) -

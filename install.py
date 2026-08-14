@@ -195,8 +195,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         "running its uninstall.sh first. Faster, but can leave stale files behind or hit a "
         "running service mid-swap; daemon-reload + restart run afterward to compensate.",
     )
-    # NOTE: -u is already taken by --user (see INSTALLER_INSTRUCTIONS.md,
-    # "Deviations from the literal spec"), so --uninstall uses -U instead.
+    # NOTE: -u is taken by --user (see AI_DOCS/INSTALLER_INSTRUCTIONS.md), so
+    # --uninstall uses -U instead.
     parser.add_argument(
         "-U", "--uninstall", action="store_true",
         help="Uninstall instead of installing.",
